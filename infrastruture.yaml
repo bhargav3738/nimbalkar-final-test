@@ -1,186 +1,152 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "Flask API Infrastructure on AWS with ECS Fargate"
+Description: Fully Automated Nimbalkar Infrastructure with ECS Fargate Deployment, Scaling, and ECR Repository
 
 Resources:
-  # VPC
+  # ECR Repository
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: flask-app
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep only the latest 5 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+
   VPC:
     Type: AWS::EC2::VPC
     Properties:
-      CidrBlock: "10.0.0.0/16"
+      CidrBlock: 10.0.0.0/16
       EnableDnsSupport: true
       EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: NimbalkarVPC
 
-  # Public Subnet 1 (First Availability Zone)
-  PublicSubnet1:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref VPC
-      CidrBlock: "10.0.1.0/24"
-      AvailabilityZone: !Select [0, !GetAZs ""]
-      MapPublicIpOnLaunch: true
-
-  # Public Subnet 2 (Second Availability Zone)
-  PublicSubnet2:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref VPC
-      CidrBlock: "10.0.2.0/24"
-      AvailabilityZone: !Select [1, !GetAZs ""]
-      MapPublicIpOnLaunch: true
-
-  # Private Subnet 1 (First Availability Zone)
-  PrivateSubnet1:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref VPC
-      CidrBlock: "10.0.3.0/24"
-      AvailabilityZone: !Select [0, !GetAZs ""]
-
-  # Private Subnet 2 (Second Availability Zone)
-  PrivateSubnet2:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref VPC
-      CidrBlock: "10.0.4.0/24"
-      AvailabilityZone: !Select [1, !GetAZs ""]
-
-  # Internet Gateway
   InternetGateway:
     Type: AWS::EC2::InternetGateway
 
-  # Attach Internet Gateway to VPC
   AttachGateway:
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
-  # NAT Gateway for Private Subnets
-  NATGateway:
-    Type: AWS::EC2::NatGateway
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
     Properties:
-      SubnetId: !Ref PublicSubnet1
-      AllocationId: !GetAtt EIP.AllocationId
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.0.1.0/24
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: true
 
-  # Elastic IP for NAT Gateway
-  EIP:
-    Type: AWS::EC2::EIP
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 10.0.2.0/24
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: true
 
-  # Public Route Table
-  PublicRouteTable:
+  RouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
 
-  # Public Route to Internet Gateway
-  PublicRoute:
+  DefaultRoute:
     Type: AWS::EC2::Route
+    DependsOn: AttachGateway
     Properties:
-      RouteTableId: !Ref PublicRouteTable
-      DestinationCidrBlock: "0.0.0.0/0"
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
 
-  # Associate Public Subnets with Public Route Table
-  PublicSubnet1RouteTableAssociation:
+  SubnetRouteTableAssoc1:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnet1
-      RouteTableId: !Ref PublicRouteTable
+      RouteTableId: !Ref RouteTable
 
-  PublicSubnet2RouteTableAssociation:
+  SubnetRouteTableAssoc2:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnet2
-      RouteTableId: !Ref PublicRouteTable
+      RouteTableId: !Ref RouteTable
 
-  # Private Route Table
-  PrivateRouteTable:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref VPC
-
-  # Private Route to NAT Gateway
-  PrivateRoute:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable
-      DestinationCidrBlock: "0.0.0.0/0"
-      NatGatewayId: !Ref NATGateway
-
-  # Associate Private Subnets with Private Route Table
-  PrivateSubnet1RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PrivateSubnet1
-      RouteTableId: !Ref PrivateRouteTable
-
-  PrivateSubnet2RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PrivateSubnet2
-      RouteTableId: !Ref PrivateRouteTable
-
-  # Security Group for ALB (Allow HTTP from anywhere)
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
+      GroupDescription: ALB Security Group
       VpcId: !Ref VPC
-      GroupDescription: "Allow HTTP traffic"
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: "0.0.0.0/0"
+          FromPort: 5000 # ALB now uses port 5000 instead of 80
+          ToPort: 5000
+          CidrIp: 0.0.0.0/0
 
-  # Security Group for ECS Tasks (Allow traffic from ALB)
   ECSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
+      GroupDescription: ECS Security Group
       VpcId: !Ref VPC
-      GroupDescription: "Allow traffic from ALB"
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 5000
+          FromPort: 5000 # Update to allow inbound traffic on port 5000 from the ALB security group
           ToPort: 5000
           SourceSecurityGroupId: !Ref ALBSecurityGroup
 
-  # Application Load Balancer (ALB) with two public subnets
-  ALB:
+  LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
+      Name: NimbalkarALB
       Subnets:
         - !Ref PublicSubnet1
         - !Ref PublicSubnet2
       SecurityGroups:
         - !Ref ALBSecurityGroup
+      Scheme: internet-facing
+      Type: application
 
-  # Target Group for ECS Tasks
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      VpcId: !Ref VPC
-      Port: 5000
+      Port: 5000 # Update target port to 5000
       Protocol: HTTP
-      HealthCheckPath: "/"
+      VpcId: !Ref VPC
       TargetType: ip
+      HealthCheckPath: /
 
-  # ALB Listener
   Listener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
-      LoadBalancerArn: !Ref ALB
-      Port: 80
-      Protocol: HTTP
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 5000 # Listener now listens on port 5000
+      Protocol: HTTP
 
-  # ECS Cluster
   ECSCluster:
     Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: NimbalkarCluster
 
-  # IAM Role for ECS Task Execution
-  ECSTaskExecutionRole:
+  TaskExecutionRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -193,123 +159,163 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
 
-  # ECS Task Definition
+  # Added AutoScaling role for ECS
+  AutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: application-autoscaling.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/flask-final
+      RetentionInDays: 1
+
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      Family: "flask-app"
+      Family: flask-final-task
+      Cpu: "256"
+      Memory: "512"
       NetworkMode: awsvpc
       RequiresCompatibilities:
         - FARGATE
-      Cpu: "256"
-      Memory: "512"
-      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
       ContainerDefinitions:
-        - Name: "flask-container"
-          Image: "<AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/my-flask-app:latest"
+        - Name: flask-final-app
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/flask-app:latest"
           PortMappings:
             - ContainerPort: 5000
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/flask-final
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
 
-  # ECS Service with DependsOn to ensure Listener is created first
   ECSService:
     Type: AWS::ECS::Service
-    DependsOn: Listener # Ensures the listener is created before the service
+    DependsOn: Listener
     Properties:
       Cluster: !Ref ECSCluster
-      TaskDefinition: !Ref TaskDefinition
+      ServiceName: NimbalkarService
+      # Updated: now has 2 backend compute nodes (tasks)
       DesiredCount: 2
       LaunchType: FARGATE
+      TaskDefinition: !Ref TaskDefinition
       NetworkConfiguration:
         AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
           Subnets:
-            - !Ref PrivateSubnet1
-            - !Ref PrivateSubnet2
+            - !Ref PublicSubnet1
+            - !Ref PublicSubnet2
           SecurityGroups:
             - !Ref ECSSecurityGroup
       LoadBalancers:
-        - ContainerName: "flask-container"
+        - ContainerName: flask-final-app
           ContainerPort: 5000
           TargetGroupArn: !Ref TargetGroup
 
-  # Auto Scaling for ECS Service
-  ScalableTarget:
+  # New resources for auto-scaling
+  ServiceScalableTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
     Properties:
       MaxCapacity: 5
       MinCapacity: 2
-      ResourceId: !Sub "service/${ECSCluster}/${ECSService.Name}"
-      ScalableDimension: "ecs:service:DesiredCount"
-      ServiceNamespace: "ecs"
+      ResourceId: !Join
+        - /
+        - - service
+          - !Ref ECSCluster
+          - !GetAtt ECSService.Name
+      RoleARN: !GetAtt AutoScalingRole.Arn
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
 
-  # Scaling Policy for Scale Out
-  ScalingPolicyOut:
+  # Scale out policy - CPU above 90% for 2 minutes
+  ScaleOutPolicy:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy
     Properties:
-      PolicyName: "ScaleOut"
-      PolicyType: "StepScaling"
-      ScalingTargetId: !Ref ScalableTarget
+      PolicyName: CPUScaleOutPolicy
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ServiceScalableTarget
       StepScalingPolicyConfiguration:
-        AdjustmentType: "ChangeInCapacity"
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 60
+        MetricAggregationType: Average
         StepAdjustments:
           - MetricIntervalLowerBound: 0
             ScalingAdjustment: 1
-        Cooldown: 300
 
-  # Scaling Policy for Scale In
-  ScalingPolicyIn:
+  # Scale in policy - CPU below 50%
+  ScaleInPolicy:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy
     Properties:
-      PolicyName: "ScaleIn"
-      PolicyType: "StepScaling"
-      ScalingTargetId: !Ref ScalableTarget
+      PolicyName: CPUScaleInPolicy
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ServiceScalableTarget
       StepScalingPolicyConfiguration:
-        AdjustmentType: "ChangeInCapacity"
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 60
+        MetricAggregationType: Average
         StepAdjustments:
           - MetricIntervalUpperBound: 0
             ScalingAdjustment: -1
-        Cooldown: 300
 
-  # CloudWatch Alarm for High CPU (Scale Out)
-  CPUHighAlarm:
+  # CloudWatch Alarm for CPU above 90% for 2 minutes (trigger scale out)
+  CPUAlarmHigh:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmDescription: "CPU utilization over 90%"
-      MetricName: "CPUUtilization"
-      Namespace: "AWS/ECS"
-      Statistic: "Average"
+      AlarmName: CPUUtilizationHigh
+      AlarmDescription: Scale out if CPU utilization is above 90% for 2 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+      Statistic: Average
       Period: 60
       EvaluationPeriods: 2
       Threshold: 90
-      ComparisonOperator: "GreaterThanThreshold"
-      Dimensions:
-        - Name: "ServiceName"
-          Value: !GetAtt ECSService.Name
-        - Name: "ClusterName"
-          Value: !Ref ECSCluster
+      ComparisonOperator: GreaterThanOrEqualToThreshold
       AlarmActions:
-        - !Ref ScalingPolicyOut
+        - !Ref ScaleOutPolicy
 
-  # CloudWatch Alarm for Low CPU (Scale In)
-  CPULowAlarm:
+  # CloudWatch Alarm for CPU below 50% (trigger scale in)
+  CPUAlarmLow:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmDescription: "CPU utilization below 50%"
-      MetricName: "CPUUtilization"
-      Namespace: "AWS/ECS"
-      Statistic: "Average"
-      Period: 60
-      EvaluationPeriods: 5
-      Threshold: 50
-      ComparisonOperator: "LessThanThreshold"
+      AlarmName: CPUUtilizationLow
+      AlarmDescription: Scale in if CPU utilization is below 50%
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
       Dimensions:
-        - Name: "ServiceName"
-          Value: !GetAtt ECSService.Name
-        - Name: "ClusterName"
+        - Name: ClusterName
           Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 50
+      ComparisonOperator: LessThanOrEqualToThreshold
       AlarmActions:
-        - !Ref ScalingPolicyIn
+        - !Ref ScaleInPolicy
 
 Outputs:
-  ALBDNSName:
-    Description: "DNS Name of the ALB"
-    Value: !GetAtt ALB.DNSName
+  LoadBalancerDNS:
+    Description: ALB DNS Name
+    Value: !GetAtt LoadBalancer.DNSName
+
+  ECRRepositoryURI:
+    Description: URI of the ECR Repository
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/flask-app"
