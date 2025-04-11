@@ -1,0 +1,463 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Patel Assignment 3 - AWS ECS Fargate Deployment with CI/CD (Updated for Final Test)
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: Your GitHub username
+  GitHubRepo:
+    Type: String
+    Default: final
+    Description: GitHub repository name
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: GitHub branch name
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: GitHub Personal Access Token (store in AWS Secrets Manager or provide manually)
+
+Resources:
+  # --- VPC ---
+  PatelVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: nimbalkar-vpc
+
+  PatelPublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref PatelVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: ca-central-1a
+      Tags:
+        - Key: Name
+          Value: nimbalkar-public-subnet-1
+
+  PatelPublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref PatelVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: ca-central-1b
+      Tags:
+        - Key: Name
+          Value: nimbalkar-public-subnet-2
+
+  PatelPrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref PatelVPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: ca-central-1a
+      Tags:
+        - Key: Name
+          Value: nimbalkar-private-subnet-1
+
+  PatelPrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref PatelVPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: ca-central-1b
+      Tags:
+        - Key: Name
+          Value: nimbalkar-private-subnet-2
+
+  PatelInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: nimbalkar-igw
+
+  PatelVPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref PatelVPC
+      InternetGatewayId: !Ref PatelInternetGateway
+
+  PatelPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref PatelVPC
+      Tags:
+        - Key: Name
+          Value: nimbalkar-public-rt
+
+  PatelPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: PatelVPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PatelPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref PatelInternetGateway
+
+  PatelPublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PatelPublicSubnet1
+      RouteTableId: !Ref PatelPublicRouteTable
+
+  PatelPublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PatelPublicSubnet2
+      RouteTableId: !Ref PatelPublicRouteTable
+
+  PatelPrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref PatelVPC
+      Tags:
+        - Key: Name
+          Value: nimbalkar-private-rt
+
+  PatelNATGatewayEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  PatelNATGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: PatelVPCGatewayAttachment
+    Properties:
+      AllocationId: !GetAtt PatelNATGatewayEIP.AllocationId
+      SubnetId: !Ref PatelPublicSubnet1
+      Tags:
+        - Key: Name
+          Value: nimbalkar-nat
+
+  PatelPrivateRoute:
+    Type: AWS::EC2::Route
+    DependsOn: PatelNATGateway
+    Properties:
+      RouteTableId: !Ref PatelPrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref PatelNATGateway
+
+  PatelPrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PatelPrivateSubnet1
+      RouteTableId: !Ref PatelPrivateRouteTable
+
+  PatelPrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PatelPrivateSubnet2
+      RouteTableId: !Ref PatelPrivateRouteTable
+
+  # --- Security Groups ---
+  PatelALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Patel ALB
+      VpcId: !Ref PatelVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: nimbalkar-alb-sg
+
+  PatelECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Patel ECS tasks
+      VpcId: !Ref PatelVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          SourceSecurityGroupId: !Ref PatelALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: nimbalkar-ecs-sg
+
+  # --- Application Load Balancer ---
+  PatelLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn:
+      - PatelPublicSubnet1
+      - PatelPublicSubnet2
+    Properties:
+      Name: nimbalkar-alb
+      Subnets:
+        - !Ref PatelPublicSubnet1
+        - !Ref PatelPublicSubnet2
+      SecurityGroups:
+        - !Ref PatelALBSecurityGroup
+      Scheme: internet-facing
+      Type: application
+
+  PatelTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: nimbalkar-tg
+      Port: 5000
+      Protocol: HTTP
+      VpcId: !Ref PatelVPC
+      TargetType: ip
+      HealthCheckPath: /
+
+  PatelListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - PatelLoadBalancer
+      - PatelTargetGroup
+    Properties:
+      LoadBalancerArn: !Ref PatelLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref PatelTargetGroup
+
+  # --- ECS Cluster ---
+  PatelECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: nimbalkar-ecs-cluster
+
+  # --- ECS Task Definition ---
+  PatelTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: nimbalkar-task
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !GetAtt PatelTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: nimbalkar-container
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.ca-central-1.amazonaws.com/nimbalkar-ecr:latest
+          PortMappings:
+            - ContainerPort: 5000
+          Essential: true
+
+  PatelTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # --- ECS Service (DesiredCount: 2) ---
+  PatelECSService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - PatelListener
+      - PatelTaskDefinition
+      - PatelTargetGroup
+    Properties:
+      Cluster: !Ref PatelECSCluster
+      ServiceName: nimbalkar-ecs-service
+      TaskDefinition: !Ref PatelTaskDefinition
+      DesiredCount: 2 # Two containers (Deliverable 7)
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PatelPrivateSubnet1
+            - !Ref PatelPrivateSubnet2
+          SecurityGroups:
+            - !Ref PatelECSSecurityGroup
+      LoadBalancers:
+        - ContainerName: nimbalkar-container
+          ContainerPort: 5000
+          TargetGroupArn: !Ref PatelTargetGroup
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+
+  # --- Auto-Scaling (Updated Policy) ---
+  PatelScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: PatelECSService
+    Properties:
+      MaxCapacity: 5 # Max 5 (Phase 3)
+      MinCapacity: 2 # Min 2 to match DesiredCount
+      ResourceId: !Sub service/${PatelECSCluster}/${PatelECSService.Name}
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  # Scale-Out Policy (CPU 90% for 2 minutes)
+  PatelScaleOutPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: nimbalkar-cpu-scale-out
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref PatelScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 90.0 # Scale out at 90% CPU (Phase 3)
+        ScaleOutCooldown: 120 # 2 minutes
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+  # Scale-In Policy (CPU below 50%)
+  PatelScaleInPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: nimbalkar-cpu-scale-in
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref PatelScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 50.0 # Scale in when below 50% (Phase 3)
+        ScaleInCooldown: 120 # 2 minutes
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+  # --- CodeBuild Role ---
+  PatelCodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PatelCodeBuildPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:*
+                  - logs:*
+                  - s3:*
+                Resource: "*"
+
+  # --- CodeBuild Project ---
+  PatelCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: nimbalkar-codebuild
+      ServiceRole: !GetAtt PatelCodeBuildRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Sub nimbalkar-codepipeline-artifacts-${AWS::AccountId}
+        Name: BuildArtifact
+        NamespaceType: NONE
+        Packaging: ZIP
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+      Source:
+        Type: GITHUB
+        Location: !Sub https://github.com/${GitHubOwner}/${GitHubRepo}.git
+        BuildSpec: buildspec.yml # Updated to match the file name
+
+  # --- CodePipeline Role ---
+  PatelCodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PatelCodePipelinePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:*
+                  - ecs:*
+                  - s3:*
+                  - iam:PassRole
+                Resource: "*"
+
+  # --- CodePipeline ---
+  PatelCodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn:
+      - PatelCodeBuildProject
+      - PatelECSService
+    Properties:
+      RoleArn: !GetAtt PatelCodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Sub nimbalkar-codepipeline-artifacts-${AWS::AccountId}
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: "1"
+              OutputArtifacts:
+                - Name: SourceArtifact
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Repo: !Ref GitHubRepo
+                Branch: !Ref GitHubBranch
+                OAuthToken: !Ref GitHubToken
+        - Name: Approval
+          Actions:
+            - Name: ManualApproval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: "1"
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+              Configuration:
+                ProjectName: !Ref PatelCodeBuildProject
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: ECS
+                Version: "1"
+              InputArtifacts:
+                - Name: BuildArtifact
+              Configuration:
+                ClusterName: !Ref PatelECSCluster
+                ServiceName: !Ref PatelECSService
+                FileName: imagedefinitions.json
+
+Outputs:
+  LoadBalancerURL:
+    Description: URL of the Application Load Balancer
+    Value: !Sub http://${PatelLoadBalancer.DNSName}
