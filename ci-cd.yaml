@@ -118,8 +118,8 @@ Resources:
               InputArtifacts:
                 - Name: BuildOutput
               Configuration:
-                ClusterName: nimbalkar-ECSCluster-ST94jkb5gsZi
-                ServiceName: nimbalkar-ECSService-wWFFxmeQe4qg
+                ClusterName: NimbalkarCluster
+                ServiceName: NimbalkarService
                 FileName: imagedefinitions.json
               RunOrder: 1
 
